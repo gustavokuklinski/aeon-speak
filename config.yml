@@ -1,0 +1,8 @@
+# plugins/speak/config.yml
+aeon_plugin:
+  plugin_name: speak
+  model_path: ./model
+  type: text-audio
+  command: /say
+  parameters: <PROMPT>
+  desc: The voice of Aeon. Use '/say /replay' to play latest audio

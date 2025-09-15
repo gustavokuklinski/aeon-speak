@@ -1,0 +1,4 @@
+gTTS
+readchar
+pygame
+simpleaudio
