@@ -13,7 +13,7 @@ from src.libs.messages import (print_error_message, print_plugin_message)
 
 def _ingest_conversation_turn(user_input, aeon_output, vectorstore, text_splitter, llama_embeddings):
     try:
-        conversation_text = f"QUESTION: {user_input}\nANSWER: {aeon_output}"
+        conversation_text = f"{user_input}\n\n{aeon_output}"
         
         conversation_document = Document(
             page_content=conversation_text,
@@ -122,7 +122,7 @@ def run_plugin(args: str, **kwargs) -> dict:
         )
 
         current_chat_history.append(
-            {"user": args, plugin_name: aeon_response_text, "source": f"{plugin_name} [ID]/audio/aeon_{timestamp}.mp3"}
+            {"user": args, plugin_name: aeon_response_text, "source": f"{plugin_name} /aeon_{timestamp}.mp3"}
         )
 
         tts = gTTS(text=aeon_response_text, lang='en')
