@@ -1,11 +1,13 @@
-import sys
+import threading
+from pynput import keyboard
 from pathlib import Path
-from gtts import gTTS
-import pygame
-import readchar
+import subprocess
+import os
+import sys
 import time
 import shutil
 from datetime import datetime
+import json
 from langchain.docstore.document import Document
 from src.utils.conversation import saveConversation
 
@@ -32,30 +34,98 @@ def _ingest_conversation_turn(user_input, aeon_output, vectorstore, text_splitte
     except Exception as e:
         print_error_message(f"Failed to ingest conversation turn: {e}")
 
-def _play_audio_file(filepath: Path):
+_stop_flag = False
+
+def on_press(key):
+    global _stop_flag
     try:
-        pygame.mixer.init()
-        pygame.mixer.music.load(str(filepath))
-        pygame.mixer.music.play()
-        
-        print_plugin_message("PLAYING... [Press SPACE to stop playback and back to prompt]")
-        
-        while pygame.mixer.music.get_busy():
-            try:
-                key = readchar.readkey()
-                if key == ' ':
-                    print_plugin_message("STOPPING...")
-                    pygame.mixer.music.stop()
-            except UnicodeDecodeError:
-                pass
-            time.sleep(0.1)
+        if key.char.lower() in ['q']:  # 'q'
+            _stop_flag = True
+            return False
+    except AttributeError:
+        if key == keyboard.Key.space:
+            _stop_flag = True
+            return False
 
-        print_plugin_message(f"LISTEN AGAIN AT: {filepath}.")
-        return {"success": True, "message": "Audio playback successful."}
+def _key_listener():
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
 
+def _play_audio_file(filepath: Path):
+    """
+    Plays an audio file using ffplay and allows the user to stop playback with SPACEBAR or Q.
+    """
+    global _stop_flag
+    _stop_flag = False
+
+    if not filepath.exists():
+        print_error_message(f"Audio file not found: {filepath}")
+        return {"success": False, "message": "Audio file not found."}
+
+    print_plugin_message("PLAYING... [Press SPACEBAR or Q to stop playback]")
+
+    # Start ffplay
+    proc = subprocess.Popen(
+        ['ffplay', '-nodisp', '-autoexit', str(filepath)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    # Start key listener in background
+    listener = threading.Thread(target=_key_listener, daemon=True)
+    listener.start()
+
+    # Poll ffplay and check stop flag
+    while proc.poll() is None:
+        if _stop_flag:
+            print_plugin_message("STOPPING...")
+            proc.terminate()
+            break
+        time.sleep(0.1)
+
+    proc.wait()
+    return {"success": True, "message": "Audio playback successful."}
+
+def _process_and_play_text(text_to_speak, current_memory_path, piper_executable, model_path):
+    """Synthesizes text to audio and plays the file."""
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    audio_dir = current_memory_path / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    main_output_filepath = audio_dir / "aeon_output.wav"
+    timestamped_copy_filepath = audio_dir / f"aeon_{timestamp}.wav"
+
+    print_plugin_message("Synthesizing audio with Piper...")
+    piper_command = [
+        piper_executable,
+        '--model', str(model_path),
+        '--output_file', str(main_output_filepath)
+    ]
+    
+    try:
+        subprocess.run(
+            piper_command,
+            input=text_to_speak.encode('utf-8'),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+    except FileNotFoundError:
+        print_error_message(f"The '{piper_executable}' executable was not found. Please ensure Piper is installed and in your system's PATH.")
+        return {"success": False, "message": f"Piper executable not found."}
+    except subprocess.CalledProcessError as e:
+        print_error_message(f"Piper failed with error: {e.stderr.decode()}")
+        return {"success": False, "message": f"Piper failed: {e.stderr.decode()}"}
     except Exception as e:
-        print_error_message(f"Could not play audio using Pygame. Error: {e}")
-        return {"success": False, "message": f"Audio playback failed: {e}"}
+        print_error_message(f"An error occurred during TTS operation: {e}")
+        return {"success": False, "message": f"TTS failed: {e}"}
+
+    shutil.copy(main_output_filepath, timestamped_copy_filepath)
+    
+    print_plugin_message(f"[AEON]: {text_to_speak}")
+    print_plugin_message(f"AUDIO SAVED: {timestamped_copy_filepath.resolve()}")
+    
+    return _play_audio_file(main_output_filepath)
 
 
 def run_plugin(args: str, **kwargs) -> dict:
@@ -74,17 +144,21 @@ def run_plugin(args: str, **kwargs) -> dict:
 
     if not args:
         print_error_message(f"Usage: /{plugin_name} <PROMPT>")
-        print_plugin_message(f"Or use /{plugin_name} replay to listen to the last generated audio.")
+        print_plugin_message(f"Or use /{plugin_name} /replay to listen to the last generated audio.")
         return {"success": False, "message": "No prompt provided."}
     
-    if command == "/replay":
-        main_output_filepath = current_memory_path / "audio" / "aeon_output.mp3"
-        if main_output_filepath.exists():
-            return _play_audio_file(main_output_filepath)
-        else:
+    plugin_dir = Path(__file__).parent
+    model_path = plugin_dir / "model" / "en_US-kathleen-low.onnx"
+    piper_executable = "piper"
+
+    if prompt == "/replay":
+        main_output_filepath = current_memory_path / "audio" / "aeon_output.wav"
+        if not main_output_filepath.exists():
             print_error_message("No audio file found to replay. Please generate a response first.")
             return {"success": False, "message": "No audio file to replay."}
-
+        
+        return _play_audio_file(main_output_filepath)
+        
     rag_chain = kwargs.get("rag_chain")
     if not rag_chain:
         print_error_message("RAG system not initialized.")
@@ -94,12 +168,6 @@ def run_plugin(args: str, **kwargs) -> dict:
         print_plugin_message("Generating response using RAG chain...")
         result = rag_chain.invoke(args)
         aeon_response_text = result.get("answer", "No answer found.")
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        audio_dir = current_memory_path / "audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-        main_output_filepath = audio_dir / "aeon_output.mp3"
-        timestamped_copy_filepath = audio_dir / f"aeon_{timestamp}.mp3"
-
 
         if not aeon_response_text:
             print_plugin_message("RAG system returned an empty response. Cannot generate audio.")
@@ -121,21 +189,8 @@ def run_plugin(args: str, **kwargs) -> dict:
             conversation_filename
         )
 
-        current_chat_history.append(
-            {"user": args, plugin_name: aeon_response_text, "source": f"{plugin_name} /aeon_{timestamp}.mp3"}
-        )
-
-        tts = gTTS(text=aeon_response_text, lang='en')
-        tts.save(main_output_filepath)
-        
-        shutil.copy(main_output_filepath, timestamped_copy_filepath)
-        
-        print_plugin_message(f"[AEON]: {aeon_response_text}")
-        print_plugin_message(f"AUDIO SAVED: {timestamped_copy_filepath.resolve()}")
-
-        return _play_audio_file(main_output_filepath)
+        return _process_and_play_text(aeon_response_text, current_memory_path, piper_executable, model_path)
 
     except Exception as e:
-        print_error_message(f"An error occurred during gTTS operation: {e}")
-        return {"success": False, "message": f"gTTS failed: {e}"}
-
+        print_error_message(f"An error occurred: {e}")
+        return {"success": False, "message": f"An unexpected error occurred: {e}"}

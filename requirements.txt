@@ -1,4 +1,2 @@
-gTTS
-readchar
-pygame
-simpleaudio
+piper-tts
+pynput
