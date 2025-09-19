@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 from langchain.docstore.document import Document
 from src.utils.conversation import saveConversation
+import speech_recognition as sr
 
 from src.libs.messages import (print_error_message, print_plugin_message)
 
@@ -39,7 +40,7 @@ _stop_flag = False
 def on_press(key):
     global _stop_flag
     try:
-        if key.char.lower() in ['q']:  # 'q'
+        if key.char.lower() in ['q']:
             _stop_flag = True
             return False
     except AttributeError:
@@ -64,7 +65,6 @@ def _play_audio_file(filepath: Path):
 
     print_plugin_message("PLAYING... [Press SPACEBAR or Q to stop playback]")
 
-    # Start ffplay
     proc = subprocess.Popen(
         ['ffplay', '-nodisp', '-autoexit', str(filepath)],
         stdin=subprocess.DEVNULL,
@@ -72,11 +72,9 @@ def _play_audio_file(filepath: Path):
         stderr=subprocess.DEVNULL
     )
 
-    # Start key listener in background
     listener = threading.Thread(target=_key_listener, daemon=True)
     listener.start()
 
-    # Poll ffplay and check stop flag
     while proc.poll() is None:
         if _stop_flag:
             print_plugin_message("STOPPING...")
@@ -107,7 +105,7 @@ def _process_and_play_text(text_to_speak, current_memory_path, piper_executable,
             piper_command,
             input=text_to_speak.encode('utf-8'),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             check=True
         )
     except FileNotFoundError:
@@ -128,6 +126,24 @@ def _process_and_play_text(text_to_speak, current_memory_path, piper_executable,
     return _play_audio_file(main_output_filepath)
 
 
+def _listen_and_transcribe():
+    """Listens for user speech and transcribes it to text."""
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print_plugin_message("Listening...")
+        r.adjust_for_ambient_noise(source)
+        try:
+            audio = r.listen(source, phrase_time_limit=5)
+            print_plugin_message("Transcribing...")
+            text = r.recognize_google(audio)
+            return text
+        except sr.UnknownValueError:
+            print_error_message("Could not understand audio.")
+            return None
+        except sr.RequestError as e:
+            print_error_message(f"Could not request results from Google Speech Recognition service; {e}")
+            return None
+
 def run_plugin(args: str, **kwargs) -> dict:
     plugin_config = kwargs.get('plugin_config')
     plugin_name = plugin_config.get("plugin_name")
@@ -136,22 +152,65 @@ def run_plugin(args: str, **kwargs) -> dict:
     llama_embeddings = kwargs.get('llama_embeddings')
     conversation_filename = kwargs.get('conversation_filename')
     current_memory_path = kwargs.get('current_memory_path')
-    current_chat_history=kwargs.get("current_chat_history")
     
+    rag_chain = kwargs.get("rag_chain")
+
     args_list = args.split(" ", 1)
     command = args_list[0].lower()
     prompt = args_list[1] if len(args_list) > 1 else ""
 
-    if not args:
-        print_error_message(f"Usage: /{plugin_name} <PROMPT>")
-        print_plugin_message(f"Or use /{plugin_name} /replay to listen to the last generated audio.")
-        return {"success": False, "message": "No prompt provided."}
-    
-    plugin_dir = Path(__file__).parent
-    model_path = plugin_dir / "model" / "en_US-kathleen-low.onnx"
-    piper_executable = "piper"
+    if command == "/talk":
+        print_plugin_message("Entering conversational mode. Say 'stop' or 'goodbye' to exit.")
+        while True:
+            user_input = _listen_and_transcribe()
+            if not user_input:
+                continue
 
-    if prompt == "/replay":
+            print_plugin_message(f"You said: {user_input}")
+            if user_input.lower() in ["stop", "goodbye", "exit"]:
+                print_plugin_message("Exiting conversational mode.")
+                return {"success": True, "message": "Exited conversational mode."}
+
+            if not rag_chain:
+                print_error_message("RAG system not initialized.")
+                return {"success": False, "message": "RAG system not initialized."}
+
+            try:
+                print_plugin_message("Generating response using RAG chain...")
+                result = rag_chain.invoke(user_input)
+                aeon_response_text = result.get("answer", "No answer found.")
+
+                if not aeon_response_text:
+                    print_plugin_message("RAG system returned an empty response. Cannot generate audio.")
+                    continue
+
+                _ingest_conversation_turn(
+                    user_input,
+                    aeon_response_text,
+                    vectorstore,
+                    text_splitter,
+                    llama_embeddings
+                )
+
+                saveConversation(
+                    user_input,
+                    aeon_response_text,
+                    plugin_name,
+                    current_memory_path,
+                    conversation_filename
+                )
+                
+                plugin_dir = Path(__file__).parent
+                model_path = plugin_dir / "model" / "en_US-kathleen-low.onnx"
+                piper_executable = "piper"
+
+                _process_and_play_text(aeon_response_text, current_memory_path, piper_executable, model_path)
+
+            except Exception as e:
+                print_error_message(f"An error occurred: {e}")
+                continue
+
+    elif command == "/replay":
         main_output_filepath = current_memory_path / "audio" / "aeon_output.wav"
         if not main_output_filepath.exists():
             print_error_message("No audio file found to replay. Please generate a response first.")
@@ -159,38 +218,47 @@ def run_plugin(args: str, **kwargs) -> dict:
         
         return _play_audio_file(main_output_filepath)
         
-    rag_chain = kwargs.get("rag_chain")
-    if not rag_chain:
-        print_error_message("RAG system not initialized.")
-        return {"success": False, "message": "RAG system not initialized."}
+    else: # Default behavior for regular text-to-speech
+        if not args:
+            print_error_message(f"Usage: /say <PROMPT>")
+            print_plugin_message(f"Or use /say /replay to listen to the last generated audio.")
+            return {"success": False, "message": "No prompt provided."}
 
-    try:
-        print_plugin_message("Generating response using RAG chain...")
-        result = rag_chain.invoke(args)
-        aeon_response_text = result.get("answer", "No answer found.")
+        if not rag_chain:
+            print_error_message("RAG system not initialized.")
+            return {"success": False, "message": "RAG system not initialized."}
 
-        if not aeon_response_text:
-            print_plugin_message("RAG system returned an empty response. Cannot generate audio.")
-            return {"success": False, "message": "RAG system returned an empty response."}
+        try:
+            print_plugin_message("Generating response using RAG chain...")
+            result = rag_chain.invoke(args)
+            aeon_response_text = result.get("answer", "No answer found.")
 
-        _ingest_conversation_turn(
-            args,
-            aeon_response_text,
-            vectorstore,
-            text_splitter,
-            llama_embeddings
-        )
+            if not aeon_response_text:
+                print_plugin_message("RAG system returned an empty response. Cannot generate audio.")
+                return {"success": False, "message": "RAG system returned an empty response."}
 
-        saveConversation(
-            args,
-            aeon_response_text,
-            plugin_name,
-            current_memory_path,
-            conversation_filename
-        )
+            _ingest_conversation_turn(
+                args,
+                aeon_response_text,
+                vectorstore,
+                text_splitter,
+                llama_embeddings
+            )
 
-        return _process_and_play_text(aeon_response_text, current_memory_path, piper_executable, model_path)
+            saveConversation(
+                args,
+                aeon_response_text,
+                plugin_name,
+                current_memory_path,
+                conversation_filename
+            )
+            
+            plugin_dir = Path(__file__).parent
+            model_path = plugin_dir / "model" / "en_US-kathleen-low.onnx"
+            piper_executable = "piper"
 
-    except Exception as e:
-        print_error_message(f"An error occurred: {e}")
-        return {"success": False, "message": f"An unexpected error occurred: {e}"}
+            return _process_and_play_text(aeon_response_text, current_memory_path, piper_executable, model_path)
+
+        except Exception as e:
+            print_error_message(f"An error occurred: {e}")
+            return {"success": False, "message": f"An unexpected error occurred: {e}"}

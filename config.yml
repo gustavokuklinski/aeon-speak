@@ -5,4 +5,4 @@ aeon_plugin:
   type: text-audio
   command: /say
   parameters: <PROMPT>
-  desc: The voice of Aeon. Use '/say /replay' to play latest audio
+  desc: "The voice of Aeon. Use '/say /talk' to open voice chat (to stop say: 'goodbye')"

@@ -1,2 +1,4 @@
 piper-tts
 pynput
+SpeechRecognition
+PyAudio
