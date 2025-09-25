@@ -14,6 +14,26 @@ import speech_recognition as sr
 
 from src.libs.messages import (print_error_message, print_plugin_message)
 
+
+_stop_flag = False
+
+def on_press(key):
+    global _stop_flag
+    try:
+        if key.char.lower() in ['q']:
+            _stop_flag = True
+            return False
+    except AttributeError:
+        if key == keyboard.Key.space:
+            _stop_flag = True
+            return False
+
+
+def _key_listener():
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
+
+
 def _ingest_conversation_turn(user_input, aeon_output, vectorstore, text_splitter, llama_embeddings):
     try:
         conversation_text = f"{user_input}\n\n{aeon_output}"
@@ -35,22 +55,6 @@ def _ingest_conversation_turn(user_input, aeon_output, vectorstore, text_splitte
     except Exception as e:
         print_error_message(f"Failed to ingest conversation turn: {e}")
 
-_stop_flag = False
-
-def on_press(key):
-    global _stop_flag
-    try:
-        if key.char.lower() in ['q']:
-            _stop_flag = True
-            return False
-    except AttributeError:
-        if key == keyboard.Key.space:
-            _stop_flag = True
-            return False
-
-def _key_listener():
-    with keyboard.Listener(on_press=on_press) as listener:
-        listener.join()
 
 def _play_audio_file(filepath: Path):
     """
@@ -84,6 +88,7 @@ def _play_audio_file(filepath: Path):
 
     proc.wait()
     return {"success": True, "message": "Audio playback successful."}
+
 
 def _process_and_play_text(text_to_speak, current_memory_path, piper_executable, model_path):
     """Synthesizes text to audio and plays the file."""
