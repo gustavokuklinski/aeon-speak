@@ -1,6 +1,6 @@
-# plugins/speak/config.yml
+# plugins/aeon-speak/config.yml
 aeon_plugin:
-  plugin_name: speak
+  plugin_name: aeon-speak
   model_path: ./model
   type: text-audio
   command: /say

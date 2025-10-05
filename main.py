@@ -40,7 +40,7 @@ def _ingest_conversation_turn(user_input, aeon_output, vectorstore, text_splitte
         
         conversation_document = Document(
             page_content=conversation_text,
-            metadata={"source": "speak"}
+            metadata={"source": "Plugin: aeon-speak"}
         )
         
         docs = text_splitter.split_documents([conversation_document])
@@ -87,7 +87,10 @@ def _play_audio_file(filepath: Path):
         time.sleep(0.1)
 
     proc.wait()
-    return {"success": True, "message": "Audio playback successful."}
+    return {
+        "success": True, 
+        "message": ""
+    }
 
 
 def _process_and_play_text(text_to_speak, current_memory_path, piper_executable, model_path):
@@ -128,8 +131,13 @@ def _process_and_play_text(text_to_speak, current_memory_path, piper_executable,
     print_plugin_message(f"[AEON]: {text_to_speak}")
     print_plugin_message(f"AUDIO SAVED: {timestamped_copy_filepath.resolve()}")
     
-    return _play_audio_file(main_output_filepath)
+    _play_audio_file(main_output_filepath)
 
+    return {
+        "message": f"{text_to_speak}",
+        "source": "aeon-speak",
+        "filepath": timestamped_copy_filepath.resolve()
+    }
 
 def _listen_and_transcribe():
     """Listens for user speech and transcribes it to text."""
